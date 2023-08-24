@@ -1,0 +1,8 @@
+<resources>
+    <string name="app_name">Nojre</string>
+    <string name="foreground_notification_channel_id">foreground_service</string>
+    <string name="foreground_notification_channel_title">Nojre</string>
+    <string name="foreground_notification_channel_name">Foreground</string>
+    <string name="foreground_notification_channel_description">Foreground service when broadcasting over udp</string>
+    <string name="title_activity_broadcast_detail">Broadcast Detail</string>
+</resources>
