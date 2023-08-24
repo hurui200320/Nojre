@@ -50,7 +50,7 @@
         </activity>
 
         <service
-            android:name=".NojreForegroundService"
+            android:name=".service.NojreForegroundService"
             android:foregroundServiceType="microphone"
             tools:node="merge" />
     </application>

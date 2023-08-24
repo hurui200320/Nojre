@@ -1,4 +1,4 @@
-package info.skyblond.nojre
+package info.skyblond.nojre.service
 
 import android.annotation.SuppressLint
 import android.app.Notification
@@ -23,6 +23,10 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
+import info.skyblond.nojre.R
+import info.skyblond.nojre.decryptMessage
+import info.skyblond.nojre.encryptMessage
+import info.skyblond.nojre.sha256ToKey
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch

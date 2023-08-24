@@ -1,9 +1,8 @@
-package info.skyblond.nojre
+package info.skyblond.nojre.service
 
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
-import java.net.DatagramPacket
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.concurrent.ConcurrentLinkedQueue

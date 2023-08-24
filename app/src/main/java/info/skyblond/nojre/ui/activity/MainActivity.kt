@@ -30,15 +30,13 @@ import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.lifecycleScope
-import info.skyblond.nojre.NojreForegroundService
+import info.skyblond.nojre.service.NojreForegroundService
 import info.skyblond.nojre.dataStore
 import info.skyblond.nojre.ui.intent
 import info.skyblond.nojre.ui.startActivity
 import info.skyblond.nojre.ui.theme.NojreTheme
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 
 class MainActivity : NojreAbstractActivity(
     buildMap {
