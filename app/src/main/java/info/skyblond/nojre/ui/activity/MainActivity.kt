@@ -25,20 +25,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.datastore.core.DataStore
-import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
-import androidx.datastore.preferences.preferencesDataStore
 import androidx.lifecycle.lifecycleScope
 import info.skyblond.nojre.NojreForegroundService
+import info.skyblond.nojre.dataStore
 import info.skyblond.nojre.ui.intent
-import info.skyblond.nojre.ui.showToast
 import info.skyblond.nojre.ui.startActivity
 import info.skyblond.nojre.ui.theme.NojreTheme
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 
 class MainActivity : NojreAbstractActivity(
     buildMap {
@@ -47,7 +47,6 @@ class MainActivity : NojreAbstractActivity(
             put(Manifest.permission.POST_NOTIFICATIONS, "foreground service")
     }
 ) {
-    private val dataStore: DataStore<Preferences> by preferencesDataStore(name = "settings")
 
     private var nickname by mutableStateOf("")
     private val nicknameKey = stringPreferencesKey("nickname")
@@ -70,10 +69,12 @@ class MainActivity : NojreAbstractActivity(
     private var channelText by mutableStateOf(groupChannel.toString())
     private var portText by mutableStateOf(groupChannel.toString())
 
+    private lateinit var dataStoreCollectingScope: Job
+
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        lifecycleScope.launch {
+        dataStoreCollectingScope = lifecycleScope.launch {
             dataStore.data.collect { p ->
                 p[nicknameKey]?.let { nickname = it.take(10) }
                 p[passwordKey]?.let { password = it }
@@ -200,5 +201,10 @@ class MainActivity : NojreAbstractActivity(
                 }
             }
         }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        stopService(intent(NojreForegroundService::class))
     }
 }

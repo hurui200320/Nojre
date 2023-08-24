@@ -9,9 +9,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
-import android.media.AudioDeviceInfo
 import android.media.AudioFormat
-import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -25,6 +23,10 @@ import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import java.net.DatagramPacket
 import java.net.InetAddress
 import java.net.InetSocketAddress
@@ -34,29 +36,30 @@ import java.net.SocketException
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import java.util.UUID
-import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.crypto.SecretKey
 import kotlin.concurrent.thread
-import kotlin.math.min
+import kotlin.math.absoluteValue
 
 class NojreForegroundService : Service() {
     companion object {
         private val TAG = NojreForegroundService::class.simpleName!!
-        private const val AUDIO_PACKET_SIZE = 768
-
-        // 20B from ip and 8B from UDP, assuming MTU = 1500
-        private const val UDP_PACKET_SIZE = 1472
 
         /**
          * Sample rate is fixed at 16KHz, this should be good enough
          * until we humans developed new organs to make sounds.
          * */
-        private const val SAMPLE_RATE = 16000
+        const val SAMPLE_RATE = 16000
 
         /**
          * Replay rate is slightly faster to catch up any delay.
          * */
         private const val REPLAY_RATE = 16016
+
+        /**
+         * Delete a peer if not active for 10 second
+         * */
+        private const val PEER_TIMEOUT = 10 * 1000L
     }
 
     internal val serviceRunning = AtomicBoolean(false)
@@ -81,6 +84,8 @@ class NojreForegroundService : Service() {
     internal var useVoiceCall = false
         private set
 
+    private lateinit var key: SecretKey
+
     private lateinit var wifiManager: WifiManager
     private lateinit var multicastLock: WifiManager.MulticastLock
     private lateinit var audioRecord: AudioRecord
@@ -92,8 +97,7 @@ class NojreForegroundService : Service() {
 
     internal var ourVolume by mutableStateOf(1.0)
 
-    // TODO enclose the queue into a peer info obj
-    internal val peerMap = mutableStateMapOf<String, ConcurrentLinkedQueue<Short>>()
+    internal val peerMap = mutableStateMapOf<String, NojrePeer>()
 
     private fun createForegroundNotificationChannel() {
         val id = applicationContext.getString(R.string.foreground_notification_channel_id)
@@ -141,7 +145,9 @@ class NojreForegroundService : Service() {
         // calculate the minBufferSize
         minBufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
-        ).let { ((it / AUDIO_PACKET_SIZE) + 1) * AUDIO_PACKET_SIZE }
+        ) * 2
+        // UDP MAX is 65535, we left 5KB for protocol overhead
+        check(minBufferSize < 60000) { "Minimal buffer size is bigger than max UDP packet size" }
     }
 
     inner class LocalBinder(val service: NojreForegroundService) : Binder()
@@ -159,6 +165,7 @@ class NojreForegroundService : Service() {
         groupAddress = intent.getStringExtra("group_address") ?: ""
         groupPort = intent.getIntExtra("group_port", -1)
         useVoiceCall = intent.getBooleanExtra("use_voice", false)
+        key = sha256ToKey(password.encodeToByteArray())
 
         audioRecord = AudioRecord.Builder()
             .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
@@ -206,43 +213,32 @@ class NojreForegroundService : Service() {
             while (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
                 Thread.sleep(500)
             }
+            var lastAdvertise = 0L
             val audioBuffer =
                 ByteBuffer.allocateDirect(minBufferSize).order(ByteOrder.LITTLE_ENDIAN)
             while (serviceRunning.get()) {
                 val readCount = audioRecord.read(audioBuffer, minBufferSize)
-                if (readCount == 0) continue
-                for (offset in 0 until readCount step AUDIO_PACKET_SIZE) {
-                    val len = min(AUDIO_PACKET_SIZE, readCount - offset)
-                    val byteBuffer = ByteArray(len)
-                    val buffer = ByteBuffer.wrap(byteBuffer).order(ByteOrder.LITTLE_ENDIAN)
-                    for (i in 0 until len / Short.SIZE_BYTES) {
-                        val s = (audioBuffer.getShort(offset + 2 * i) + 32768) / 65535.0
-                        // s in [0, 1]
-                        val k = ((s * ourVolume).coerceIn(0.0, 1.0) * 65535).toInt() - 32768
-                        buffer.putShort(2 * i, k.toShort())
-                    }
-                    // val key = sha256ToKey("1234".encodeToByteArray())
-                    // val (cipher, iv) = encryptMessage(
-                    //     key,
-                    //     "something".encodeToByteArray()
-                    // )
-                    // val text = decryptMessage(key, iv, cipher)
-                    // TODO protocol?
-                    val packet = DatagramPacket(byteBuffer, 0, len)
-                    packet.address = multicastGroup
-                    packet.port = groupPort
+                if (System.currentTimeMillis() - lastAdvertise > PEER_TIMEOUT / 2) {
                     try {
-                        socket.send(packet)
+                        socket.send(generateAdvertisePacket())
                     } catch (e: SocketException) {
                         break
                     }
+                    lastAdvertise = System.currentTimeMillis()
+                }
+                if (readCount == 0) continue
+                val audioPacket = generateAudioPacket(audioBuffer, readCount)
+                try {
+                    socket.send(audioPacket)
+                } catch (e: SocketException) {
+                    break
                 }
             }
         }
 
         val rxThread = thread {
             Process.setThreadPriority(Process.THREAD_PRIORITY_FOREGROUND)
-            val byteBuffer = ByteArray(1500) // MAX MTU
+            val byteBuffer = ByteArray(65536)
             while (serviceRunning.get()) {
                 val packet = DatagramPacket(byteBuffer, 0, byteBuffer.size)
                 try {
@@ -258,14 +254,28 @@ class NojreForegroundService : Service() {
                 // skip out own packet
                 if (ourIPs.any { it.address.contentEquals(sourceAddress.address.address) }) continue
 
+                val decrypted = decryptPacket(packet) ?: continue
+
                 val key = sourceAddress.address.hostAddress!!
-                val queue = peerMap.getOrPut(key) { ConcurrentLinkedQueue<Short>() }
-                // if there are more than 500ms of data waiting for processing, we drop them
-                if (queue.size > SAMPLE_RATE / 2) queue.clear()
-                // TODO: Protocol?
-                val buffer = ByteBuffer.wrap(byteBuffer).order(ByteOrder.LITTLE_ENDIAN)
-                for (i in 0 until packet.length / Short.SIZE_BYTES) {
-                    queue.offer(buffer.getShort(2 * i))
+                val peer = peerMap.getOrPut(key) { NojrePeer() }
+                peer.handlePacket(decrypted)
+            }
+        }
+
+        val cleanUpThread = thread {
+            runBlocking(Dispatchers.Default) {
+                launch {
+                    while (serviceRunning.get()) {
+                        delay(PEER_TIMEOUT)
+                        val now = System.currentTimeMillis()
+                        peerMap.keys.forEach { k ->
+                            peerMap.compute(k) { _, peer ->
+                                val lastSeen = peer?.lastSeen ?: 0
+                                if (now - lastSeen >= PEER_TIMEOUT) null
+                                else peer
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -273,26 +283,95 @@ class NojreForegroundService : Service() {
         val mixerThread = thread {
             Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
             while (serviceRunning.get()) {
-                Thread.sleep(5)
-                val samples = DoubleArray(512) {
-                    peerMap.mapNotNull { (_, queue) ->
-                        queue.poll()?.let { (it + 32768) / 65535.0 } ?: 0.0
+                val samples = DoubleArray(256) {
+                    peerMap.mapNotNull { (_, peer) ->
+                        val v = peer.queue.poll()?.let { it / 32767.0 } ?: 0.0
+                        v * peer.volume
                     }.sum()
                 }
-                val max = samples.max().coerceAtLeast(1.0)
+                // make sure we don't amplify the sound
+                val max = samples.maxOf { it.absoluteValue }.coerceAtLeast(1.0)
                 for (i in samples.indices) {
                     samples[i] /= max
                 }
                 val buffer = ByteArray(samples.size * Short.SIZE_BYTES)
                 val byteBuffer = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
                 for (i in samples.indices) {
-                    byteBuffer.putShort(2 * i, ((samples[i] * 65535).toInt() - 32768).toShort())
+                    byteBuffer.putShort(
+                        2 * i,
+                        (samples[i] * 32767).toInt().coerceIn(-32768, 32767).toShort()
+                    )
                 }
                 audioTrack.write(buffer, 0, buffer.size)
             }
         }
 
         return START_STICKY
+    }
+
+    /**
+     * Generate encrypted packet.
+     *
+     * [1B:version]: fixed, 0x01.
+     * [12B:iv]: AES/GCM/NoPadding IV.
+     * [??]: AES/GCM encrypted data.
+     * */
+    private fun generateEncryptedPacket(data: ByteArray): DatagramPacket {
+        val (cipher, iv) = encryptMessage(key, data)
+        val packetData = ByteArray(1 + 12 + cipher.size)
+        packetData[0] = 0x01 // header: 0x01 -> AES GCM NoPadding, 12B iv
+        System.arraycopy(iv, 0, packetData, 1, iv.size)
+        System.arraycopy(cipher, 0, packetData, 1 + iv.size, cipher.size)
+        val packet = DatagramPacket(packetData, 0, packetData.size)
+        packet.address = multicastGroup
+        packet.port = groupPort
+        return packet
+    }
+
+    private fun decryptPacket(packet: DatagramPacket): ByteArray? {
+        // unknown packet
+        if (packet.data[packet.offset].toInt() != 0x01) return null
+        val iv = packet.data.copyOfRange(packet.offset + 1, packet.offset + 1 + 12)
+        val cipher = packet.data.copyOfRange(packet.offset + 1 + 12, packet.offset + packet.length)
+        return try {
+            decryptMessage(key, iv, cipher)
+        } catch (t: Throwable) {
+            null
+        }
+    }
+
+    /**
+     * Generate advertise packet.
+     *
+     * [1B:header]: fixed, 0x01
+     * [??]: UTF-8 encoded nickname
+     * */
+    private fun generateAdvertisePacket(): DatagramPacket {
+        val nicknameUTF8 = nickname.encodeToByteArray()
+        val byteArray = ByteArray(nicknameUTF8.size + 1)
+        byteArray[0] = 0x01 // header -> Nickname advertise packet
+        System.arraycopy(nicknameUTF8, 0, byteArray, 1, nicknameUTF8.size)
+        return generateEncryptedPacket(byteArray)
+    }
+
+    /**
+     * Generate audio packet.
+     * MONO, 16000KHz, 16bit signed, little endian.
+     *
+     * [1B:header]: fixed, 0x02
+     * [??]: PCM data
+     * */
+    private fun generateAudioPacket(audioBuffer: ByteBuffer, readCount: Int): DatagramPacket {
+        val byteArray = ByteArray(readCount + 1)
+        byteArray[0] = 0x02 // header -> MONO 16KHz signed 16bit little endian PCM
+        val buffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN)
+        for (i in 0 until readCount / Short.SIZE_BYTES) {
+            val s = audioBuffer.getShort(2 * i) / 32767.0
+            // s in [-1, 1]
+            val k = (s * ourVolume * 32767).toInt().coerceIn(-32768, 32767)
+            buffer.putShort(1 + 2 * i, k.toShort())
+        }
+        return generateEncryptedPacket(byteArray)
     }
 
     override fun onDestroy() {

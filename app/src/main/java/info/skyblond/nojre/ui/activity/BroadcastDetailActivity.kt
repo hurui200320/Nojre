@@ -53,7 +53,6 @@ class BroadcastDetailActivity : NojreAbstractActivity() {
         }
     }
 
-    @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContent {
@@ -124,7 +123,28 @@ class BroadcastDetailActivity : NojreAbstractActivity() {
         Text(text = "Known peers:")
         Spacer(modifier = Modifier.height(10.dp))
         for (p in nojreService.peerMap) {
-            Text(text = p.key) // TODO: Peer card
+            Text(text = "${p.key}: ${p.value.nickname}")
+            var localVolumeLock by remember { mutableStateOf(true) }
+            Row(
+                horizontalArrangement = Arrangement.Start,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(text = "local volume: ${(p.value.volume * 100).toInt()}%")
+                Spacer(modifier = Modifier.fillMaxWidth(0.04f))
+                Button(
+                    onClick = { localVolumeLock = !localVolumeLock },
+                    colors = if (localVolumeLock) ButtonDefaults.buttonColors()
+                    else ButtonDefaults.buttonColors(containerColor = Color(0xFFB80000), contentColor = Color.White),
+                ) {
+                    Text(text = if (localVolumeLock) "Unlock volume" else " Lock volume ")
+                }
+            }
+            Slider(
+                value = p.value.volume.toFloat(),
+                valueRange = 0f..1.5f, onValueChange = {
+                    p.value.volume = (it * 100).toInt() / 100.0
+                }, enabled = !localVolumeLock
+            )
             Spacer(modifier = Modifier.height(10.dp))
         }
     }
