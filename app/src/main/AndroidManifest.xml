@@ -13,10 +13,15 @@
         android:required="true" />
     <uses-permission
         android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE"
-        android:required="true" /> <!-- For getting audio -->
+        android:required="true" />
+    <!-- For getting audio -->
     <uses-permission
         android:name="android.permission.RECORD_AUDIO"
-        android:required="true" /> <!-- For foreground service -->
+        android:required="true" />
+    <uses-permission
+        android:name="android.permission.MODIFY_AUDIO_SETTINGS"
+        android:required="true" />
+    <!-- For foreground service -->
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE"
         android:required="true" />

@@ -1,8 +1,11 @@
 package info.skyblond.nojre.ui.activity
 
 import android.Manifest
+import android.media.AudioAttributes
+import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
+import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -11,6 +14,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -25,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
@@ -60,9 +65,6 @@ class MainActivity : NojreAbstractActivity(
     private var groupPort by mutableStateOf(1024)
     private val groupPortKey = intPreferencesKey("groupPort")
 
-    private var useVoiceCall by mutableStateOf(false)
-    private val useVoiceCallKey = booleanPreferencesKey("useVoiceCall")
-
     // the string buffer for numeric values
     private var channelText by mutableStateOf(groupChannel.toString())
     private var portText by mutableStateOf(groupChannel.toString())
@@ -84,7 +86,6 @@ class MainActivity : NojreAbstractActivity(
                     groupPort = it.coerceIn(1024, 65535)
                     portText = groupPort.toString()
                 }
-                p[useVoiceCallKey]?.let { useVoiceCall = it }
             }
         }
 
@@ -137,20 +138,6 @@ class MainActivity : NojreAbstractActivity(
                             horizontalArrangement = Arrangement.Center,
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text(text = "Use Media")
-                            Spacer(modifier = Modifier.fillMaxWidth(0.02f))
-                            Switch(checked = useVoiceCall, onCheckedChange = {
-                                useVoiceCall = it
-                            })
-                            Spacer(modifier = Modifier.fillMaxWidth(0.02f))
-                            Text(text = "Use Voice")
-                        }
-                        Spacer(modifier = Modifier.fillMaxHeight(0.04f))
-
-                        Row(
-                            horizontalArrangement = Arrangement.Center,
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
                             Button(
                                 enabled = (channelText.toIntOrNull() ?: -1) in 0..65535
                                         && (portText.toIntOrNull() ?: -1) in 1024..65535,
@@ -164,7 +151,6 @@ class MainActivity : NojreAbstractActivity(
                                             p[passwordKey] = password
                                             p[groupChannelKey] = groupChannel
                                             p[groupPortKey] = groupPort
-                                            p[useVoiceCallKey] = useVoiceCall
                                         }
                                     }
                                     // start service
@@ -176,7 +162,6 @@ class MainActivity : NojreAbstractActivity(
                                         "239.255.${groupChannel / 256}.${groupChannel % 256}"
                                     )
                                     service.putExtra("group_port", groupPort)
-                                    service.putExtra("use_voice", useVoiceCall)
                                     stopService(service)
                                     startForegroundService(service)
                                 }) {

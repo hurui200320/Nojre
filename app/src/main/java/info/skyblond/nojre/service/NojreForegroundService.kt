@@ -5,11 +5,15 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.ServiceInfo
 import android.media.AudioAttributes
+import android.media.AudioDeviceInfo
 import android.media.AudioFormat
+import android.media.AudioManager
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
@@ -27,6 +31,7 @@ import info.skyblond.nojre.R
 import info.skyblond.nojre.decryptMessage
 import info.skyblond.nojre.encryptMessage
 import info.skyblond.nojre.sha256ToKey
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -47,7 +52,7 @@ import kotlin.math.absoluteValue
 
 class NojreForegroundService : Service() {
     companion object {
-        private val TAG = NojreForegroundService::class.simpleName!!
+        private val TAG = "NojreService"
 
         /**
          * Sample rate is fixed at 16KHz, this should be good enough
@@ -84,17 +89,19 @@ class NojreForegroundService : Service() {
     internal var groupPort = 0
         private set
 
-    @Volatile
-    internal var useVoiceCall = false
-        private set
-
     private lateinit var key: SecretKey
 
     private lateinit var wifiManager: WifiManager
     private lateinit var multicastLock: WifiManager.MulticastLock
-    private lateinit var audioRecord: AudioRecord
-    private lateinit var audioTrack: AudioTrack
+    private lateinit var audioManager: AudioManager
     private var minBufferSize: Int = 0
+
+    @Volatile
+    private lateinit var audioRecord: AudioRecord
+
+    @Volatile
+    private lateinit var audioTrack: AudioTrack
+
 
     private lateinit var multicastGroup: InetAddress
     private lateinit var socket: MulticastSocket
@@ -146,6 +153,7 @@ class NojreForegroundService : Service() {
         // get a wifi manager for multicast lock
         wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
         multicastLock = wifiManager.createMulticastLock("nojre")
+        audioManager = getSystemService(AUDIO_SERVICE) as AudioManager
         // calculate the minBufferSize
         minBufferSize = AudioRecord.getMinBufferSize(
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
@@ -158,20 +166,14 @@ class NojreForegroundService : Service() {
 
     override fun onBind(intent: Intent?): IBinder = LocalBinder(this)
 
+    private fun canUseBluetoothMic(): Boolean =
+        audioManager.isBluetoothScoAvailableOffCall // can use SCO
+                && audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } // we have SCO input
+
     @SuppressLint("MissingPermission")
-    override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
-        // skip if we're already started
-        if (serviceRunning.get()) return START_STICKY
-        serviceRunning.set(true)
-
-        nickname = intent.getStringExtra("nickname") ?: ""
-        password = intent.getStringExtra("password") ?: ""
-        groupAddress = intent.getStringExtra("group_address") ?: ""
-        groupPort = intent.getIntExtra("group_port", -1)
-        useVoiceCall = intent.getBooleanExtra("use_voice", false)
-        key = sha256ToKey(password.encodeToByteArray())
-
-        audioRecord = AudioRecord.Builder()
+    private fun buildAudioRecorder(): AudioRecord {
+        val r = AudioRecord.Builder()
             .setAudioSource(MediaRecorder.AudioSource.VOICE_COMMUNICATION)
             .setAudioFormat(
                 AudioFormat.Builder()
@@ -182,8 +184,19 @@ class NojreForegroundService : Service() {
             )
             .setBufferSizeInBytes(minBufferSize)
             .build()
+        // use SCO input if available
+        // TODO: What about multiple SCO devices?
+        audioManager.getDevices(AudioManager.GET_DEVICES_INPUTS)
+            .find { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+            ?.let { r.preferredDevice = it }
+        r.startRecording()
+        return r
+    }
 
-        audioTrack = AudioTrack.Builder()
+    private fun buildAudioTrack(): AudioTrack {
+        val preferredDevice = audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS)
+            .find { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO }
+        val r = AudioTrack.Builder()
             .setAudioFormat(
                 AudioFormat.Builder()
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
@@ -191,126 +204,203 @@ class NojreForegroundService : Service() {
                     .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
                     .build()
             )
-            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
             .setAudioAttributes(
                 AudioAttributes.Builder()
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .setUsage(
-                        if (useVoiceCall) AudioAttributes.USAGE_VOICE_COMMUNICATION
+                        // if we have bt headset, use voice
+                        if (preferredDevice != null && canUseBluetoothMic()) AudioAttributes.USAGE_VOICE_COMMUNICATION
                         else AudioAttributes.USAGE_MEDIA
                     )
                     .build()
             )
             .setBufferSizeInBytes(minBufferSize)
             .build()
+        // use SCO output if available
+        // TODO: What if user want a different output?
+        preferredDevice?.let { if (canUseBluetoothMic()) r.preferredDevice = it }
+        r.play()
+        return r
+    }
+
+    private fun refreshAudioIO() {
+        // audio recorder
+        val oldAudioRecorder = kotlin.runCatching { audioRecord }.getOrNull()
+        val newAudioRecord = buildAudioRecorder()
+        audioRecord = newAudioRecord
+        oldAudioRecorder?.stop()
+        oldAudioRecorder?.release()
+        // audio track
+        val oldAudioTrack = kotlin.runCatching { audioTrack }.getOrNull()
+        val newAudioTrack = buildAudioTrack()
+        audioTrack = newAudioTrack
+        oldAudioTrack?.stop()
+        oldAudioTrack?.release()
+    }
+
+    private val bluetoothScoIntentFilter = IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED)
+    private val bluetoothScoReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent) {
+            if (intent.action == AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED) {
+                when (intent.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, -1)) {
+                    // on connect, we require system to go back to normal mode
+                    // thus we can got music stream on bt headset
+                    AudioManager.SCO_AUDIO_STATE_CONNECTED -> {
+                        audioManager.mode = AudioManager.MODE_NORMAL
+                    }
+
+                    AudioManager.SCO_AUDIO_STATE_DISCONNECTED -> {
+                    }
+                }
+                // refresh audio input and out when changed
+                refreshAudioIO()
+            }
+        }
+    }
+
+    @SuppressLint("MissingPermission")
+    override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
+        // skip if we're already started
+        if (serviceRunning.get()) return START_STICKY
+        serviceRunning.set(true)
+
+        nickname = intent.getStringExtra("nickname") ?: ""
+        password = intent.getStringExtra("password") ?: ""
+        groupAddress = intent.getStringExtra("group_address") ?: ""
+        groupPort = intent.getIntExtra("group_port", -1)
+
+        if (canUseBluetoothMic()) {
+            registerReceiver(bluetoothScoReceiver, bluetoothScoIntentFilter)
+            audioManager.startBluetoothSco()
+            audioManager.isBluetoothScoOn = true
+        } else {
+            refreshAudioIO()
+        }
+
+        key = sha256ToKey(password.encodeToByteArray())
 
         // use 239.255.0.0/16 for ipv4 local scope
         multicastLock.acquire()
         multicastGroup = InetAddress.getByName(groupAddress)
         socket = MulticastSocket(groupPort)
         socket.joinGroup(multicastGroup)
-        audioRecord.startRecording()
-        audioTrack.play()
 
-        val txThread = thread {
-            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            while (audioRecord.state != AudioRecord.STATE_INITIALIZED) {
-                Thread.sleep(500)
-            }
-            var lastAdvertise = 0L
-            val audioBuffer =
-                ByteBuffer.allocateDirect(minBufferSize).order(ByteOrder.LITTLE_ENDIAN)
-            while (serviceRunning.get()) {
-                val readCount = audioRecord.read(audioBuffer, minBufferSize)
-                if (System.currentTimeMillis() - lastAdvertise > PEER_TIMEOUT / 2) {
-                    try {
-                        socket.send(generateAdvertisePacket())
-                    } catch (e: SocketException) {
-                        break
-                    }
-                    lastAdvertise = System.currentTimeMillis()
-                }
-                if (readCount == 0) continue
-                val audioPacket = generateAudioPacket(audioBuffer, readCount)
-                try {
-                    socket.send(audioPacket)
-                } catch (e: SocketException) {
-                    break
-                }
-            }
-        }
-
-        val rxThread = thread {
-            Process.setThreadPriority(Process.THREAD_PRIORITY_FOREGROUND)
-            val byteBuffer = ByteArray(65536)
-            while (serviceRunning.get()) {
-                val packet = DatagramPacket(byteBuffer, 0, byteBuffer.size)
-                try {
-                    socket.receive(packet)
-                } catch (e: SocketException) {
-                    break
-                }
-                val sourceAddress = packet.socketAddress as InetSocketAddress
-                // skip different port
-                if (sourceAddress.port != groupPort) continue
-                val ourIPs = NetworkInterface.getNetworkInterfaces().asSequence()
-                    .flatMap { it.inetAddresses.asSequence() }
-                // skip out own packet
-                if (ourIPs.any { it.address.contentEquals(sourceAddress.address.address) }) continue
-
-                val decrypted = decryptPacket(packet) ?: continue
-
-                val key = sourceAddress.address.hostAddress!!
-                val peer = peerMap.getOrPut(key) { NojrePeer() }
-                peer.handlePacket(decrypted)
-            }
-        }
-
-        val cleanUpThread = thread {
-            runBlocking(Dispatchers.Default) {
-                launch {
-                    while (serviceRunning.get()) {
-                        delay(PEER_TIMEOUT)
-                        val now = System.currentTimeMillis()
-                        peerMap.keys.forEach { k ->
-                            peerMap.compute(k) { _, peer ->
-                                val lastSeen = peer?.lastSeen ?: 0
-                                if (now - lastSeen >= PEER_TIMEOUT) null
-                                else peer
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        val mixerThread = thread {
-            Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
-            while (serviceRunning.get()) {
-                val samples = DoubleArray(256) {
-                    peerMap.mapNotNull { (_, peer) ->
-                        val v = peer.queue.poll()?.let { it / 32767.0 } ?: 0.0
-                        v * peer.volume
-                    }.sum()
-                }
-                // make sure we don't amplify the sound
-                val max = samples.maxOf { it.absoluteValue }.coerceAtLeast(1.0)
-                for (i in samples.indices) {
-                    samples[i] /= max
-                }
-                val buffer = ByteArray(samples.size * Short.SIZE_BYTES)
-                val byteBuffer = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
-                for (i in samples.indices) {
-                    byteBuffer.putShort(
-                        2 * i,
-                        (samples[i] * 32767).toInt().coerceIn(-32768, 32767).toShort()
-                    )
-                }
-                audioTrack.write(buffer, 0, buffer.size)
-            }
-        }
+        startTxThread()
+        startRxThread()
+        startLoopThread()
+        startMixerThread()
 
         return START_STICKY
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startTxThread() = thread {
+        while (!::audioRecord.isInitialized) {
+            Thread.sleep(500)
+        }
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        var lastAdvertise = 0L
+        val audioBuffer =
+            ByteBuffer.allocateDirect(minBufferSize).order(ByteOrder.LITTLE_ENDIAN)
+        while (serviceRunning.get()) {
+            val readCount = audioRecord.read(audioBuffer, minBufferSize)
+            if (System.currentTimeMillis() - lastAdvertise > PEER_TIMEOUT / 2) {
+                try {
+                    socket.send(generateAdvertisePacket())
+                } catch (e: SocketException) {
+                    break
+                }
+                lastAdvertise = System.currentTimeMillis()
+            }
+            if (readCount == 0) continue
+            val audioPacket = generateAudioPacket(audioBuffer, readCount)
+            try {
+                socket.send(audioPacket)
+            } catch (e: SocketException) {
+                break
+            }
+        }
+        audioRecord.stop()
+        audioRecord.release()
+    }
+
+    private fun startRxThread() = thread {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_FOREGROUND)
+        val byteBuffer = ByteArray(65536)
+        while (serviceRunning.get()) {
+            val packet = DatagramPacket(byteBuffer, 0, byteBuffer.size)
+            try {
+                socket.receive(packet)
+            } catch (e: SocketException) {
+                break
+            }
+            val sourceAddress = packet.socketAddress as InetSocketAddress
+            // skip different port
+            if (sourceAddress.port != groupPort) continue
+            val ourIPs = NetworkInterface.getNetworkInterfaces().asSequence()
+                .flatMap { it.inetAddresses.asSequence() }
+            // skip out own packet
+            if (ourIPs.any { it.address.contentEquals(sourceAddress.address.address) }) continue
+
+            val decrypted = decryptPacket(packet) ?: continue
+
+            val key = sourceAddress.address.hostAddress!!
+            val peer = peerMap.getOrPut(key) { NojrePeer() }
+            peer.handlePacket(decrypted)
+        }
+    }
+
+    private fun cleanUpOldPeers() {
+        val now = System.currentTimeMillis()
+        peerMap.keys.forEach { k ->
+            peerMap.compute(k) { _, peer ->
+                val lastSeen = peer?.lastSeen ?: 0
+                if (now - lastSeen >= PEER_TIMEOUT) null
+                else peer
+            }
+        }
+    }
+
+    private suspend fun loop(
+        ctx: CoroutineScope, delayMs: Long,
+        block: suspend CoroutineScope.() -> Unit
+    ) = ctx.launch {
+        while (serviceRunning.get()) {
+            delay(delayMs)
+            block()
+        }
+    }
+
+    private fun startLoopThread() = thread {
+        runBlocking(Dispatchers.Default) {
+            loop(this, PEER_TIMEOUT) { cleanUpOldPeers() }
+        }
+    }
+
+    private fun startMixerThread() = thread {
+        Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
+        while (serviceRunning.get()) {
+            val samples = DoubleArray(256) {
+                peerMap.mapNotNull { (_, peer) ->
+                    val v = peer.queue.poll()?.let { it / 32767.0 } ?: 0.0
+                    v * peer.volume
+                }.sum()
+            }
+            // make sure we don't amplify the sound
+            val max = samples.maxOf { it.absoluteValue }.coerceAtLeast(1.0)
+            for (i in samples.indices) {
+                samples[i] /= max
+            }
+            val buffer = ByteArray(samples.size * Short.SIZE_BYTES)
+            val byteBuffer = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
+            for (i in samples.indices) {
+                byteBuffer.putShort(
+                    2 * i,
+                    (samples[i] * 32767).toInt().coerceIn(-32768, 32767).toShort()
+                )
+            }
+            audioTrack.write(buffer, 0, buffer.size)
+        }
     }
 
     /**
@@ -386,8 +476,12 @@ class NojreForegroundService : Service() {
         kotlin.runCatching { multicastLock.release() }
         kotlin.runCatching { audioTrack.stop() }
         kotlin.runCatching { audioTrack.release() }
-        kotlin.runCatching { audioRecord.stop() }
-        kotlin.runCatching { audioRecord.release() }
+        if (canUseBluetoothMic()) {
+            unregisterReceiver(bluetoothScoReceiver)
+            kotlin.runCatching { audioManager.isBluetoothScoOn = false }
+            kotlin.runCatching { audioManager.mode = AudioManager.MODE_NORMAL }
+            kotlin.runCatching { audioManager.stopBluetoothSco() }
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 }

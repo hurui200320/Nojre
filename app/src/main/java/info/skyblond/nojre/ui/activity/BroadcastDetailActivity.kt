@@ -94,7 +94,6 @@ class BroadcastDetailActivity : NojreAbstractActivity() {
         Text(text = "Password: ${nojreService.password}")
         Text(text = "Multicast ip: ${nojreService.groupAddress}")
         Text(text = "Multicast port: ${nojreService.groupPort}")
-        Text(text = "Output: ${if (nojreService.useVoiceCall) "Voice" else "Media"}")
         Spacer(modifier = Modifier.height(20.dp))
         var volumeLock by remember { mutableStateOf(true) }
         Row(
