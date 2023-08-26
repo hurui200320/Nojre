@@ -412,7 +412,7 @@ class NojreForegroundService : Service() {
      * */
     private fun generateEncryptedPacket(data: ByteArray): DatagramPacket {
         val (cipher, iv) = encryptMessage(key, data)
-        val packetData = ByteArray(1 + 12 + cipher.size)
+        val packetData = ByteArray(1 + iv.size + cipher.size)
         packetData[0] = 0x01 // header: 0x01 -> AES GCM NoPadding, 12B iv
         System.arraycopy(iv, 0, packetData, 1, iv.size)
         System.arraycopy(cipher, 0, packetData, 1 + iv.size, cipher.size)
