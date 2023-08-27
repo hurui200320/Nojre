@@ -22,6 +22,7 @@ import android.os.Binder
 import android.os.Build
 import android.os.IBinder
 import android.os.Process
+import android.util.Log
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
@@ -31,6 +32,7 @@ import info.skyblond.nojre.R
 import info.skyblond.nojre.decryptMessage
 import info.skyblond.nojre.encryptMessage
 import info.skyblond.nojre.sha256ToKey
+import info.skyblond.nojre.ui.showToast
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -159,7 +161,10 @@ class NojreForegroundService : Service() {
             SAMPLE_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT
         ) * 2
         // UDP MAX is 65535, we left 5KB for protocol overhead
-        check(minBufferSize < 60000) { "Minimal buffer size is bigger than max UDP packet size" }
+        if (minBufferSize > 60000) {
+            showToast("Buffer size too big, clap to 60000")
+            minBufferSize = 60000
+        }
     }
 
     inner class LocalBinder(val service: NojreForegroundService) : Binder()
@@ -259,9 +264,13 @@ class NojreForegroundService : Service() {
     }
 
     @SuppressLint("MissingPermission")
-    override fun onStartCommand(intent: Intent, flags: Int, startId: Int): Int {
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent == null) {
+            showToast("No parameter input. Intent is null")
+            return START_NOT_STICKY
+        }
         // skip if we're already started
-        if (serviceRunning.get()) return START_STICKY
+        if (serviceRunning.get()) return START_NOT_STICKY
         serviceRunning.set(true)
 
         nickname = intent.getStringExtra("nickname") ?: ""
@@ -269,12 +278,12 @@ class NojreForegroundService : Service() {
         groupAddress = intent.getStringExtra("group_address") ?: ""
         groupPort = intent.getIntExtra("group_port", -1)
 
+        refreshAudioIO()
+
         if (canUseBluetoothMic()) {
             registerReceiver(bluetoothScoReceiver, bluetoothScoIntentFilter)
             audioManager.startBluetoothSco()
             audioManager.isBluetoothScoOn = true
-        } else {
-            refreshAudioIO()
         }
 
         key = sha256ToKey(password.encodeToByteArray())
@@ -290,7 +299,7 @@ class NojreForegroundService : Service() {
         startLoopThread()
         startMixerThread()
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     @SuppressLint("MissingPermission")
@@ -342,9 +351,8 @@ class NojreForegroundService : Service() {
             // skip out own packet
             if (ourIPs.any { it.address.contentEquals(sourceAddress.address.address) }) continue
 
+            val key = sourceAddress.address.hostAddress ?: continue
             val decrypted = decryptPacket(packet) ?: continue
-
-            val key = sourceAddress.address.hostAddress!!
             val peer = peerMap.getOrPut(key) { NojrePeer() }
             peer.handlePacket(decrypted)
         }
