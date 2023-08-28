@@ -266,17 +266,19 @@ class NojreForegroundService : Service() {
     @SuppressLint("MissingPermission")
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
-            showToast("No parameter input. Intent is null")
+            showToast("WTF: Service start on null intent")
+            Log.wtf(TAG, "Service start on null intent")
             return START_NOT_STICKY
         }
         // skip if we're already started
-        if (serviceRunning.get()) return START_NOT_STICKY
+        if (serviceRunning.get()) return START_REDELIVER_INTENT
         serviceRunning.set(true)
 
-        nickname = intent.getStringExtra("nickname") ?: ""
-        password = intent.getStringExtra("password") ?: ""
-        groupAddress = intent.getStringExtra("group_address") ?: ""
-        groupPort = intent.getIntExtra("group_port", -1)
+        // in case there is no intent input,
+        nickname = intent.getStringExtra("nickname") ?: nickname
+        password = intent.getStringExtra("password") ?: password
+        groupAddress = intent.getStringExtra("group_address") ?: groupAddress
+        groupPort = intent.getIntExtra("group_port", groupPort)
 
         refreshAudioIO()
 
@@ -298,34 +300,31 @@ class NojreForegroundService : Service() {
         startRxThread()
         startLoopThread()
         startMixerThread()
-
-        return START_NOT_STICKY
+        // in case service is killed, keep the input intent when restart
+        return START_REDELIVER_INTENT
     }
 
     @SuppressLint("MissingPermission")
     private fun startTxThread() = thread {
-        while (!::audioRecord.isInitialized) {
-            Thread.sleep(500)
-        }
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         var lastAdvertise = 0L
         val audioBuffer =
             ByteBuffer.allocateDirect(minBufferSize).order(ByteOrder.LITTLE_ENDIAN)
         while (serviceRunning.get()) {
-            val readCount = audioRecord.read(audioBuffer, minBufferSize)
-            if (System.currentTimeMillis() - lastAdvertise > PEER_TIMEOUT / 2) {
-                try {
-                    socket.send(generateAdvertisePacket())
-                } catch (e: SocketException) {
-                    break
-                }
-                lastAdvertise = System.currentTimeMillis()
-            }
-            if (readCount == 0) continue
-            val audioPacket = generateAudioPacket(audioBuffer, readCount)
             try {
+                // advertise
+                if (System.currentTimeMillis() - lastAdvertise > PEER_TIMEOUT / 2) {
+                    socket.send(generateAdvertisePacket())
+                    lastAdvertise = System.currentTimeMillis()
+                }
+                // audio
+                val readCount = audioRecord.read(audioBuffer, minBufferSize)
+                if (readCount == 0) continue
+                val audioPacket = generateAudioPacket(audioBuffer, readCount)
                 socket.send(audioPacket)
-            } catch (e: SocketException) {
+            } catch (t: Throwable) {
+                // might fail to read audio input, or send udp packet.
+                // either case, break loop
                 break
             }
         }
@@ -341,6 +340,7 @@ class NojreForegroundService : Service() {
             try {
                 socket.receive(packet)
             } catch (e: SocketException) {
+                // break loop if failed to read udp
                 break
             }
             val sourceAddress = packet.socketAddress as InetSocketAddress

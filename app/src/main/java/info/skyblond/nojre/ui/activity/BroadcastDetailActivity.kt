@@ -105,8 +105,11 @@ class BroadcastDetailActivity : NojreAbstractActivity() {
             Button(
                 onClick = { volumeLock = !volumeLock },
                 colors = if (volumeLock) ButtonDefaults.buttonColors()
-                else ButtonDefaults.buttonColors(containerColor = Color(0xFFB80000), contentColor = Color.White),
-                ) {
+                else ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFFB80000),
+                    contentColor = Color.White
+                ),
+            ) {
                 Text(text = if (volumeLock) "Unlock volume" else " Lock volume ")
             }
         }
@@ -132,7 +135,10 @@ class BroadcastDetailActivity : NojreAbstractActivity() {
                 Button(
                     onClick = { localVolumeLock = !localVolumeLock },
                     colors = if (localVolumeLock) ButtonDefaults.buttonColors()
-                    else ButtonDefaults.buttonColors(containerColor = Color(0xFFB80000), contentColor = Color.White),
+                    else ButtonDefaults.buttonColors(
+                        containerColor = Color(0xFFB80000),
+                        contentColor = Color.White
+                    ),
                 ) {
                     Text(text = if (localVolumeLock) "Unlock volume" else " Lock volume ")
                 }

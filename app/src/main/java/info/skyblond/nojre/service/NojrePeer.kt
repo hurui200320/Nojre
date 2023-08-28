@@ -22,6 +22,7 @@ class NojrePeer(
         val nicknameBytes = packet.copyOfRange(1, packet.size)
         kotlin.runCatching { nickname = nicknameBytes.decodeToString() }
     }
+
     private fun handleAudioPacket(packet: ByteArray) {
         // if there are more than 500ms of data waiting for processing, we drop them
         if (queue.size > NojreForegroundService.SAMPLE_RATE / 2) queue.clear()
@@ -30,9 +31,10 @@ class NojrePeer(
             queue.offer(buffer.getShort(1 + 2 * i))
         }
     }
+
     fun handlePacket(packet: ByteArray) {
         lastSeen = System.currentTimeMillis()
-        when (packet[0].toInt()){
+        when (packet[0].toInt()) {
             0x01 -> handleAdvertisePacket(packet)
             0x02 -> handleAudioPacket(packet)
         }

@@ -1,11 +1,8 @@
 package info.skyblond.nojre.ui.activity
 
 import android.Manifest
-import android.media.AudioAttributes
-import android.media.AudioManager
 import android.os.Build
 import android.os.Bundle
-import android.util.Log
 import androidx.activity.compose.setContent
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -14,13 +11,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextField
 import androidx.compose.runtime.getValue
@@ -29,18 +24,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.unit.dp
-import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.lifecycle.lifecycleScope
 import info.skyblond.nojre.service.NojreForegroundService
-import info.skyblond.nojre.dataStore
+import info.skyblond.nojre.ui.dataStore
 import info.skyblond.nojre.ui.intent
 import info.skyblond.nojre.ui.startActivity
 import info.skyblond.nojre.ui.theme.NojreTheme
-import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 
 class MainActivity : NojreAbstractActivity(
@@ -52,29 +44,25 @@ class MainActivity : NojreAbstractActivity(
 ) {
 
     private var nickname by mutableStateOf("")
-    private val nicknameKey = stringPreferencesKey("nickname")
-
     private var password by mutableStateOf("")
-    private val passwordKey = stringPreferencesKey("password")
 
-    // 239.255.0.0/16
-    // use can only choose the lower 16 bit -> 0~65535
+    // 239.255.0.0/16, can only choose the lower 16 bit -> 0~65535
     private var groupChannel by mutableStateOf(0)
-    private val groupChannelKey = intPreferencesKey("groupChannel")
-
     private var groupPort by mutableStateOf(1024)
+
+    private val nicknameKey = stringPreferencesKey("nickname")
+    private val passwordKey = stringPreferencesKey("password")
+    private val groupChannelKey = intPreferencesKey("groupChannel")
     private val groupPortKey = intPreferencesKey("groupPort")
 
     // the string buffer for numeric values
     private var channelText by mutableStateOf(groupChannel.toString())
-    private var portText by mutableStateOf(groupChannel.toString())
-
-    private lateinit var dataStoreCollectingScope: Job
+    var portText by mutableStateOf(groupChannel.toString())
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        dataStoreCollectingScope = lifecycleScope.launch {
+        lifecycleScope.launch {
             dataStore.data.collect { p ->
                 p[nicknameKey]?.let { nickname = it.take(10) }
                 p[passwordKey]?.let { password = it }
