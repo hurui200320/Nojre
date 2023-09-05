@@ -54,7 +54,7 @@ import kotlin.math.absoluteValue
 
 class NojreForegroundService : Service() {
     companion object {
-        private val TAG = "NojreService"
+        private const val TAG = "NojreService"
 
         /**
          * Sample rate is fixed at 16KHz, this should be good enough
