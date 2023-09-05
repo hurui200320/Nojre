@@ -146,7 +146,7 @@ class BroadcastDetailActivity : NojreAbstractActivity() {
             Slider(
                 value = p.value.volume.toFloat(),
                 valueRange = 0f..1.5f, onValueChange = {
-                    p.value.volume = (it * 100).toInt() / 100.0
+                    p.value.volume = (it * 100).toInt() / 100.0f
                 }, enabled = !localVolumeLock
             )
             Spacer(modifier = Modifier.height(10.dp))

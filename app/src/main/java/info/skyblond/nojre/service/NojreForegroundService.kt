@@ -206,7 +206,7 @@ class NojreForegroundService : Service() {
                 AudioFormat.Builder()
                     .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
                     .setSampleRate(REPLAY_RATE)
-                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setEncoding(AudioFormat.ENCODING_PCM_FLOAT)
                     .build()
             )
             .setAudioAttributes(
@@ -308,8 +308,7 @@ class NojreForegroundService : Service() {
     private fun startTxThread() = thread {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         var lastAdvertise = 0L
-        val audioBuffer =
-            ByteBuffer.allocateDirect(minBufferSize).order(ByteOrder.LITTLE_ENDIAN)
+        val audioBuffer = ShortArray(minBufferSize / Short.SIZE_BYTES)
         while (serviceRunning.get()) {
             try {
                 // advertise
@@ -318,8 +317,8 @@ class NojreForegroundService : Service() {
                     lastAdvertise = System.currentTimeMillis()
                 }
                 // audio
-                val readCount = audioRecord.read(audioBuffer, minBufferSize)
-                if (readCount == 0) continue
+                val readCount = audioRecord.read(audioBuffer, 0, audioBuffer.size)
+                if (readCount <= 0) continue
                 val audioPacket = generateAudioPacket(audioBuffer, readCount)
                 socket.send(audioPacket)
             } catch (t: Throwable) {
@@ -388,26 +387,19 @@ class NojreForegroundService : Service() {
     private fun startMixerThread() = thread {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO)
         while (serviceRunning.get()) {
-            val samples = DoubleArray(256) {
+            val samples = FloatArray(256) {
                 peerMap.mapNotNull { (_, peer) ->
-                    val v = peer.queue.poll()?.let { it / 32767.0 } ?: 0.0
+                    val v = peer.queue.poll()?.let { it / 32767.0f } ?: 0.0f
                     v * peer.volume
                 }.sum()
             }
             // make sure we don't amplify the sound
-            val max = samples.maxOf { it.absoluteValue }.coerceAtLeast(1.0)
+            val max = samples.maxOf { it.absoluteValue }.coerceAtLeast(1.0f)
             for (i in samples.indices) {
                 samples[i] /= max
-            }
-            val buffer = ByteArray(samples.size * Short.SIZE_BYTES)
-            val byteBuffer = ByteBuffer.wrap(buffer).order(ByteOrder.LITTLE_ENDIAN)
-            for (i in samples.indices) {
-                byteBuffer.putShort(
-                    2 * i,
-                    (samples[i] * 32767).toInt().coerceIn(-32768, 32767).toShort()
-                )
-            }
-            audioTrack.write(buffer, 0, buffer.size)
+            } // now we're in -1.0 ~ 1.0
+            // we can write directly with float data
+            audioTrack.write(samples, 0, samples.size, AudioTrack.WRITE_BLOCKING)
         }
     }
 
@@ -463,12 +455,12 @@ class NojreForegroundService : Service() {
      * [1B:header]: fixed, 0x02
      * [??]: PCM data
      * */
-    private fun generateAudioPacket(audioBuffer: ByteBuffer, readCount: Int): DatagramPacket {
-        val byteArray = ByteArray(readCount + 1)
+    private fun generateAudioPacket(audioBuffer: ShortArray, readCount: Int): DatagramPacket {
+        val byteArray = ByteArray(readCount * Short.SIZE_BYTES + 1)
         byteArray[0] = 0x02 // header -> MONO 16KHz signed 16bit little endian PCM
         val buffer = ByteBuffer.wrap(byteArray).order(ByteOrder.LITTLE_ENDIAN)
-        for (i in 0 until readCount / Short.SIZE_BYTES) {
-            val s = audioBuffer.getShort(2 * i) / 32767.0
+        for (i in 0 until readCount) {
+            val s = audioBuffer[i] / 32767.0
             // s in [-1, 1]
             val k = (s * ourVolume * 32767).toInt().coerceIn(-32768, 32767)
             buffer.putShort(1 + 2 * i, k.toShort())

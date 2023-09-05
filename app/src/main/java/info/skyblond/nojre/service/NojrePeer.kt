@@ -12,7 +12,7 @@ class NojrePeer(
     lastSeen: Long = 0L
 ) {
     var nickname by mutableStateOf(nickname)
-    var volume by mutableStateOf(1.0)
+    var volume by mutableStateOf(1.0f)
     var lastSeen by mutableStateOf(lastSeen)
         private set
 
